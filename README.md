@@ -1,4 +1,5 @@
-opkg update
-opkg install git
-
-cd /tmp && git clone https://github.com/clonethinh/V5ROUTER.git && cd V5ROUTER && chmod +x setup.sh && ./setup.sh
+cd /tmp
+mkdir -p V5ROUTER && cd V5ROUTER
+wget https://raw.githubusercontent.com/clonethinh/V5ROUTER/main/setup.sh
+chmod +x setup.sh
+./setup.sh
