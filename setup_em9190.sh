@@ -2623,7 +2623,7 @@ init_monthly_file() {
   "version": "1.0",
   "created_at": "$(date '+%Y-%m-%d %H:%M:%S')"
 }
-EOF
+ EOF
         
         # Kiểm tra file được tạo thành công
         if [ -f "$month_file" ] && [ -s "$month_file" ]; then
@@ -2918,6 +2918,7 @@ log "SMS send operation completed - ID: $SMS_ID, Archive: $ARCHIVE_SUCCESS, Dele
 # ─── CLEANUP ───────────────────────────────────────────────────────────────────
 flock -u 300 2>/dev/null
 exit 0
+
 EOF
 
 # 3. Tạo CGI script
