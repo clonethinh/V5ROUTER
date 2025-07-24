@@ -24,12 +24,17 @@ debug "Monthly file: $MONTHLY_FILE"
 init_monthly_file() {
     if [ ! -f "$MONTHLY_FILE" ] || [ ! -s "$MONTHLY_FILE" ]; then
         debug "Creating/recreating monthly file"
-        cat > "$MONTHLY_FILE" << 'EOF'
+        
+        # Tạo dynamic values
+        CURRENT_MONTH_INIT=$(date "+%Y-%m")
+        CURRENT_TIMESTAMP=$(date "+%Y-%m-%d %H:%M:%S")
+        
+        cat > "$MONTHLY_FILE" << EOF
 {
-  "month": "2025-07",
+  "month": "$CURRENT_MONTH_INIT",
   "messages": [],
   "total": 0,
-  "last_updated": "2025-07-24 13:30:00"
+  "last_updated": "$CURRENT_TIMESTAMP"
 }
 EOF
     else
@@ -37,12 +42,16 @@ EOF
         if command -v jq >/dev/null 2>&1; then
             if ! jq . "$MONTHLY_FILE" >/dev/null 2>&1; then
                 debug "Monthly file corrupt, recreating"
-                cat > "$MONTHLY_FILE" << 'EOF'
+                
+                CURRENT_MONTH_INIT=$(date "+%Y-%m")
+                CURRENT_TIMESTAMP=$(date "+%Y-%m-%d %H:%M:%S")
+                
+                cat > "$MONTHLY_FILE" << EOF
 {
-  "month": "2025-07", 
+  "month": "$CURRENT_MONTH_INIT", 
   "messages": [],
   "total": 0,
-  "last_updated": "2025-07-24 13:30:00"
+  "last_updated": "$CURRENT_TIMESTAMP"
 }
 EOF
             fi
