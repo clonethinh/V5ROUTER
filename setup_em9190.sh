@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 # Chuyển vào thư mục tạm trước khi thực hiện
 cd /tmp
