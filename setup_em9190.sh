@@ -2780,7 +2780,7 @@ MSG_JSON=$(cat <<EOF
   "storage": "router",
   "read_status": 1
 }
-EOF
+ EOF
 )
 
 log "Created message JSON for SMS $SMS_ID"
@@ -2908,7 +2908,7 @@ RESPONSE_JSON=$(cat <<EOF
   },
   "timestamp": "$(date '+%Y-%m-%d %H:%M:%S')"
 }
-EOF
+ EOF
 )
 
 echo "$RESPONSE_JSON"
@@ -2962,7 +2962,7 @@ init_monthly_file() {
   "total": 0,
   "last_updated": "$CURRENT_TIMESTAMP"
 }
-EOF
+ EOF
     else
         debug "Monthly file exists"
         if command -v jq >/dev/null 2>&1; then
@@ -2979,7 +2979,7 @@ EOF
   "total": 0,
   "last_updated": "$CURRENT_TIMESTAMP"
 }
-EOF
+ EOF
             fi
         fi
     fi
@@ -3233,7 +3233,7 @@ return_error() {
     "failed_count": 0,
     "timestamp": "$(date '+%Y-%m-%d %H:%M:%S')"
 }
-EOF
+ EOF
     exit 1
 }
 
@@ -3566,7 +3566,7 @@ cat << EOF
         "timestamp": "$(date '+%Y-%m-%d %H:%M:%S')"
     }
 }
-EOF
+ EOF
 
 # === CLEANUP ===
 rm -f "$TEMP_FILE"
@@ -3622,7 +3622,7 @@ return_error() {
     "details": "$(escape_json "$details")",
     "timestamp": "$(date '+%Y-%m-%d %H:%M:%S')"
 }
-EOF
+ EOF
     exit 1
 }
 
@@ -3750,7 +3750,7 @@ if mv "$TEMP_FILE" "$MONTHLY_FILE"; then
     "backup_file": "$BACKUP_FILE",
     "timestamp": "$(date '+%Y-%m-%d %H:%M:%S')"
 }
-EOF
+ EOF
     exit 0
 else
     # Rollback
