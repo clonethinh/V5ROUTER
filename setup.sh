@@ -1,82 +1,36 @@
-#!/bin/sh
+#!/bin/bash
 
-# === CẤU HÌNH ===
-TARGET_DIR="/www/em9190"
-PORT=9090
-CGI_SRC="./cgi-bin"
+# Chuyển vào thư mục tạm trước khi thực hiện
+cd /tmp
 
-echo "===================================="
-echo "[🚀] BẮT ĐẦU TRIỂN KHAI EM9190 SMS UI"
-echo "===================================="
+# Cập nhật danh sách gói opkg
+opkg update
 
-# === 1. TẠO THƯ MỤC ĐÍCH ===
-echo "[*] Kiểm tra thư mục $TARGET_DIR..."
-mkdir -p "$TARGET_DIR/cgi-bin"
+# Tạo thư mục nếu chưa có
+mkdir -p /www/em9190
+mkdir -p /www/em9190/cgi-bin
 
-# === 2. SAO CHÉP FILE HTML/CSS/JS/CGI ===
-echo "[*] Sao chép file HTML, CSS, JS, CGI..."
-cp -v sms.html style.css script.js "$TARGET_DIR/" 2>/dev/null
-cp -v "$CGI_SRC"/* "$TARGET_DIR/cgi-bin/" 2>/dev/null
-chmod +x "$TARGET_DIR/cgi-bin/"*
+# Tải file style, html, js
+wget -O /www/em9190/style.css https://raw.githubusercontent.com/clonethinh/V5ROUTER/refs/heads/main/style.css
+wget -O /www/em9190/sms.html https://raw.githubusercontent.com/clonethinh/V5ROUTER/refs/heads/main/sms.html
+wget -O /www/em9190/script.js https://raw.githubusercontent.com/clonethinh/V5ROUTER/refs/heads/main/script.js
 
-# === 3. CẤU HÌNH UHTTPD TRÊN CỔNG MỚI ===
-echo "[*] Cấu hình uhttpd chạy cổng $PORT..."
-uci set uhttpd.main.listen_http="0.0.0.0:$PORT"
-uci set uhttpd.main.home="$TARGET_DIR"
-uci commit uhttpd
+# Tải file CGI
+wget -O /www/em9190/cgi-bin/sms-send https://raw.githubusercontent.com/clonethinh/V5ROUTER/refs/heads/main/cgi-bin/sms-send
+wget -O /www/em9190/cgi-bin/sms-read https://raw.githubusercontent.com/clonethinh/V5ROUTER/refs/heads/main/cgi-bin/sms-read
+wget -O /www/em9190/cgi-bin/sms-mark-read https://raw.githubusercontent.com/clonethinh/V5ROUTER/refs/heads/main/cgi-bin/sms-mark-read
+wget -O /www/em9190/cgi-bin/sms-delete https://raw.githubusercontent.com/clonethinh/V5ROUTER/refs/heads/main/cgi-bin/sms-delete
+
+# Cấp quyền thực thi cho CGI
+chmod +x /www/em9190/cgi-bin/*
+
+# Kiểm tra và cài đặt các thành phần cần thiết nếu chưa có
+opkg list-installed | grep modemmanager || opkg install modemmanager
+opkg list-installed | grep jq || opkg install jq
+opkg list-installed | grep uhttpd || opkg install uhttpd
+
+# Đổi cổng uhttpd sang 9090 và khởi động lại
+sed -i 's/listen_http.*/listen_http 0.0.0.0:9090/' /etc/config/uhttpd
 /etc/init.d/uhttpd restart
 
-# === 4. TỰ ĐỘNG KIỂM TRA & CÀI GÓI THIẾU ===
-check_or_install() {
-    if ! command -v "$1" >/dev/null 2>&1; then
-        echo "[-] Thiếu: $1 ❌ → Cài đặt..."
-        opkg update
-        opkg install "$1"
-        if command -v "$1" >/dev/null 2>&1; then
-            echo "[+] Đã cài $1 thành công ✅"
-        else
-            echo "[!] Không thể cài $1 ❌ Vui lòng kiểm tra kết nối mạng hoặc kho opkg."
-        fi
-    else
-        echo "[✓] Đã có: $1 ✅"
-    fi
-}
-
-echo "[*] Kiểm tra & cài đặt các gói cần thiết..."
-check_or_install mmcli
-check_or_install uhttpd
-check_or_install jq
-check_or_install ModemManager
-
-# === 5. KHỞI ĐỘNG DỊCH VỤ NẾU CHƯA CHẠY ===
-for svc in uhttpd ModemManager; do
-    if ! pgrep "$svc" >/dev/null 2>&1; then
-        echo "[*] Dịch vụ $svc chưa chạy → khởi động..."
-        /etc/init.d/"$svc" start
-    fi
-done
-
-# === 6. KIỂM TRA MODEM EM9190 ===
-echo "[*] Kiểm tra modem EM9190..."
-MODEM_FOUND=""
-for ID in $(mmcli -L 2>/dev/null | grep -oE '/Modem/[0-9]+' | cut -d/ -f3); do
-    MODEL=$(mmcli -m "$ID" | grep 'model:' | awk -F ':' '{print $2}' | xargs)
-    if echo "$MODEL" | grep -qi "EM9190"; then
-        MODEM_FOUND="$ID"
-        echo "[✓] Tìm thấy EM9190 tại Modem ID $ID ✅"
-        break
-    fi
-done
-
-if [ -z "$MODEM_FOUND" ]; then
-    echo "[-] Không thấy EM9190. Thử restart ModemManager..."
-    /etc/init.d/ModemManager restart
-    sleep 3
-    mmcli -L
-fi
-
-# === 7. HOÀN TẤT ===
-echo "===================================="
-echo "[✅] Cài đặt hoàn tất!"
-echo "🔗 Truy cập giao diện tại: http://<router-ip>:$PORT/sms.html"
-echo "===================================="
+echo "Hoàn thành thiết lập SMS Manager Pro."
