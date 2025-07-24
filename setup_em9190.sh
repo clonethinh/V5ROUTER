@@ -2566,7 +2566,7 @@ JSONEOF
 EOF
 
 echo "Tạo CGI SMS-SEND script..."
-cat > "$CGI_DIR/sms-read" << 'EOF'
+cat > "$CGI_DIR/sms-send" << 'EOF'
 #!/bin/sh
 # ─── HTTP HEADER ────────────────────────────────────────────────────────────────
 echo "Content-Type: application/json; charset=utf-8"
