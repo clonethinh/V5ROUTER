@@ -2,6 +2,255 @@
 echo "Content-Type: application/json; charset=utf-8"
 echo ""
 
+# === KIỂM TRA MODE VÀ QUERY PARAMETERS ===
+MODE="${QUERY_STRING%%&*}"
+DAEMON_PID_FILE="/var/run/sms-read-daemon.pid"
+
+# === CHỨC NĂNG AUTO-DETECT ENDPOINT ===
+detect_endpoint() {
+    local ip_addr port endpoint
+    
+    # Detect IP address
+    ip_addr=$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \K\S+' | head -1)
+    if [ -z "$ip_addr" ]; then
+        # Fallback methods
+        for iface in br-lan eth0 wlan0 enp0s3 ens33; do
+            ip_addr=$(ip addr show "$iface" 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d'/' -f1 | head -1)
+            [ -n "$ip_addr" ] && [ "$ip_addr" != "127.0.0.1" ] && break
+        done
+    fi
+    [ -z "$ip_addr" ] && ip_addr="127.0.0.1"
+    
+    # Detect port
+    for test_port in 8888 80 8080 8000 3000; do
+        if ss -ln 2>/dev/null | grep -q ":$test_port.*LISTEN" || \
+           netstat -ln 2>/dev/null | grep -q ":$test_port.*LISTEN"; then
+            port="$test_port"
+            break
+        fi
+    done
+    [ -z "$port" ] && port="8888"
+    
+    endpoint="http://${ip_addr}:${port}/cgi-bin/sms-read"
+    echo "$endpoint"
+}
+
+# === CHỨC NĂNG DAEMON MODE ===
+# === REAL-TIME POLLING WITH MICRO DELAYS ===
+if echo "$MODE" | grep -q 'daemon=1'; then
+    # Kiểm tra daemon đã chạy chưa
+    if [ -f "$DAEMON_PID_FILE" ]; then
+        EXISTING_PID=$(cat "$DAEMON_PID_FILE" 2>/dev/null)
+        if [ -n "$EXISTING_PID" ] && ps -p "$EXISTING_PID" >/dev/null 2>&1; then
+            echo '{"status":"daemon already running","pid":'$EXISTING_PID'}'
+            exit 0
+        else
+            rm -f "$DAEMON_PID_FILE"
+        fi
+    fi
+    
+    echo '{"status":"daemon starting","message":"Real-time SMS polling daemon started"}'
+    
+    # Start real-time daemon
+    (
+        echo $$ > "$DAEMON_PID_FILE"
+        ENDPOINT=$(detect_endpoint)
+        
+        # Real-time polling configuration
+        MICRO_DELAY=0.1      # 1 giây - micro delay
+        FAST_DELAY=1       # 3 giây - khi có hoạt động
+        NORMAL_DELAY=3     # 8 giây - bình thường
+        SLOW_DELAY=5      # 20 giây - khi im lặng
+        ERROR_DELAY=15     # 45 giây - khi có lỗi
+        
+        # State tracking
+        PREVIOUS_TOTAL=0
+        PREVIOUS_UNREAD=0
+        ACTIVITY_SCORE=0
+        CONSECUTIVE_EMPTY=0
+        POLL_COUNT=0
+        
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - Real-time SMS Daemon started (PID: $$)" >> "/tmp/sms-daemon.log"
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - Endpoint: $ENDPOINT" >> "/tmp/sms-daemon.log"
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - Delays: Micro=$MICRO_DELAY, Fast=$FAST_DELAY, Normal=$NORMAL_DELAY, Slow=$SLOW_DELAY" >> "/tmp/sms-daemon.log"
+        
+        # Cleanup function
+        cleanup_daemon() {
+            echo "$(date '+%Y-%m-%d %H:%M:%S') - Real-time SMS Daemon stopping (PID: $$)" >> "/tmp/sms-daemon.log"
+            rm -f "$DAEMON_PID_FILE"
+            exit 0
+        }
+        trap cleanup_daemon TERM INT
+        
+        # Main real-time polling loop
+        while true; do
+            POLL_COUNT=$((POLL_COUNT + 1))
+            START_TIME=$(date +%s)
+            
+            # Re-detect endpoint mỗi 200 polls
+            if [ $((POLL_COUNT % 200)) -eq 0 ]; then
+                ENDPOINT=$(detect_endpoint)
+                echo "$(date '+%Y-%m-%d %H:%M:%S') - Endpoint re-detected: $ENDPOINT (poll #$POLL_COUNT)" >> "/tmp/sms-daemon.log"
+            fi
+            
+            # Execute SMS polling
+            RESPONSE=$(curl -s -m 8 "$ENDPOINT" 2>&1)
+            CURL_EXIT_CODE=$?
+            END_TIME=$(date +%s)
+            RESPONSE_TIME=$((END_TIME - START_TIME))
+            
+            if [ $CURL_EXIT_CODE -eq 0 ]; then
+                if command -v jq >/dev/null 2>&1; then
+                    CURRENT_TOTAL=$(echo "$RESPONSE" | jq -r '.total // 0' 2>/dev/null || echo "0")
+                    CURRENT_UNREAD=$(echo "$RESPONSE" | jq '[.messages[]? | select(.read_status == 0)] | length' 2>/dev/null || echo "0")
+                    
+                    # Calculate activity metrics
+                    TOTAL_CHANGE=$((CURRENT_TOTAL - PREVIOUS_TOTAL))
+                    UNREAD_CHANGE=$((CURRENT_UNREAD - PREVIOUS_UNREAD))
+                    
+                    # Determine polling strategy based on activity
+                    if [ "$TOTAL_CHANGE" -gt 0 ]; then
+                        # NEW MESSAGES DETECTED - Ultra fast polling
+                        ACTIVITY_SCORE=10
+                        CONSECUTIVE_EMPTY=0
+                        NEXT_DELAY=$MICRO_DELAY
+                        
+                        echo "$(date '+%Y-%m-%d %H:%M:%S') - 🚨 NEW SMS! +$TOTAL_CHANGE messages (Total: $CURRENT_TOTAL, Unread: $CURRENT_UNREAD) [MICRO-DELAY: ${MICRO_DELAY}s]" >> "/tmp/sms-daemon.log"
+                        
+                        # Burst polling cho 30 giây khi có SMS mới
+                        BURST_COUNT=30
+                        while [ $BURST_COUNT -gt 0 ] && [ -f "$DAEMON_PID_FILE" ]; do
+                            sleep $MICRO_DELAY
+                            curl -s -m 5 "$ENDPOINT" >/dev/null 2>&1
+                            BURST_COUNT=$((BURST_COUNT - 1))
+                        done
+                        
+                    elif [ "$CURRENT_UNREAD" -gt 0 ]; then
+                        # Has unread messages - Fast polling
+                        ACTIVITY_SCORE=$((ACTIVITY_SCORE > 0 ? ACTIVITY_SCORE - 1 : 0))
+                        CONSECUTIVE_EMPTY=0
+                        
+                        if [ "$ACTIVITY_SCORE" -gt 5 ]; then
+                            NEXT_DELAY=$FAST_DELAY
+                            STATUS="FAST"
+                        else
+                            NEXT_DELAY=$NORMAL_DELAY
+                            STATUS="NORMAL"
+                        fi
+                        
+                        echo "$(date '+%Y-%m-%d %H:%M:%S') - 📬 Unread: $CURRENT_UNREAD messages (Activity: $ACTIVITY_SCORE) [$STATUS-DELAY: ${NEXT_DELAY}s]" >> "/tmp/sms-daemon.log"
+                        
+                    else
+                        # No activity - Gradually slow down
+                        CONSECUTIVE_EMPTY=$((CONSECUTIVE_EMPTY + 1))
+                        ACTIVITY_SCORE=$((ACTIVITY_SCORE > 0 ? ACTIVITY_SCORE - 1 : 0))
+                        
+                        if [ $CONSECUTIVE_EMPTY -lt 5 ]; then
+                            NEXT_DELAY=$NORMAL_DELAY
+                            STATUS="NORMAL"
+                        elif [ $CONSECUTIVE_EMPTY -lt 15 ]; then
+                            NEXT_DELAY=$SLOW_DELAY
+                            STATUS="SLOW"
+                        else
+                            # Adaptive slow down
+                            ADAPTIVE_DELAY=$((SLOW_DELAY + CONSECUTIVE_EMPTY))
+                            NEXT_DELAY=$((ADAPTIVE_DELAY > 60 ? 60 : ADAPTIVE_DELAY))
+                            STATUS="ADAPTIVE"
+                        fi
+                        
+                        # Log mỗi 10 polls khi không có hoạt động
+                        if [ $((POLL_COUNT % 10)) -eq 0 ]; then
+                            echo "$(date '+%Y-%m-%d %H:%M:%S') - 💤 No activity ($CONSECUTIVE_EMPTY empty polls) [$STATUS-DELAY: ${NEXT_DELAY}s]" >> "/tmp/sms-daemon.log"
+                        fi
+                    fi
+                    
+                    # Update state
+                    PREVIOUS_TOTAL="$CURRENT_TOTAL"
+                    PREVIOUS_UNREAD="$CURRENT_UNREAD"
+                    
+                else
+                    # No jq available - use conservative approach
+                    NEXT_DELAY=$NORMAL_DELAY
+                    echo "$(date '+%Y-%m-%d %H:%M:%S') - Poll OK (no jq) - Response time: ${RESPONSE_TIME}s" >> "/tmp/sms-daemon.log"
+                fi
+                
+            else
+                # Polling failed
+                ACTIVITY_SCORE=0
+                CONSECUTIVE_EMPTY=$((CONSECUTIVE_EMPTY + 1))
+                NEXT_DELAY=$ERROR_DELAY
+                
+                echo "$(date '+%Y-%m-%d %H:%M:%S') - ❌ Poll failed (exit: $CURL_EXIT_CODE) [ERROR-DELAY: ${ERROR_DELAY}s]" >> "/tmp/sms-daemon.log"
+                echo "$(date '+%Y-%m-%d %H:%M:%S') - Error details: $RESPONSE" >> "/tmp/sms-daemon.log"
+            fi
+            
+            # Performance monitoring
+            if [ $((POLL_COUNT % 100)) -eq 0 ]; then
+                UPTIME=$(ps -o etime= -p $$ | tr -d ' ')
+                echo "$(date '+%Y-%m-%d %H:%M:%S') - 📊 Performance: Poll #$POLL_COUNT, Uptime: $UPTIME, Activity: $ACTIVITY_SCORE" >> "/tmp/sms-daemon.log"
+            fi
+            
+            # Log rotation
+            if [ $((POLL_COUNT % 500)) -eq 0 ]; then
+                if [ -f "/tmp/sms-daemon.log" ] && [ $(stat -c%s "/tmp/sms-daemon.log" 2>/dev/null || echo 0) -gt 2097152 ]; then
+                    mv "/tmp/sms-daemon.log" "/tmp/sms-daemon.log.old"
+                    echo "$(date '+%Y-%m-%d %H:%M:%S') - 🔄 Log rotated at poll #$POLL_COUNT" >> "/tmp/sms-daemon.log"
+                fi
+            fi
+            
+            # Adaptive sleep based on response time
+            if [ "$RESPONSE_TIME" -gt 3 ]; then
+                # Server slow - increase delay
+                NEXT_DELAY=$((NEXT_DELAY + 2))
+                echo "$(date '+%Y-%m-%d %H:%M:%S') - ⚠️ Slow response (${RESPONSE_TIME}s), adjusted delay to ${NEXT_DELAY}s" >> "/tmp/sms-daemon.log"
+            fi
+            
+            sleep $NEXT_DELAY
+        done
+    ) &
+    
+    exit 0
+fi
+
+# === CHỨC NĂNG STOP DAEMON ===
+if echo "$MODE" | grep -q 'daemon=stop'; then
+    if [ -f "$DAEMON_PID_FILE" ]; then
+        DAEMON_PID=$(cat "$DAEMON_PID_FILE")
+        if ps -p "$DAEMON_PID" >/dev/null 2>&1; then
+            kill "$DAEMON_PID" 2>/dev/null
+            sleep 2
+            if ps -p "$DAEMON_PID" >/dev/null 2>&1; then
+                kill -9 "$DAEMON_PID" 2>/dev/null
+            fi
+            rm -f "$DAEMON_PID_FILE"
+            echo '{"status":"daemon stopped","pid":'$DAEMON_PID'}'
+        else
+            rm -f "$DAEMON_PID_FILE"
+            echo '{"status":"daemon not running"}'
+        fi
+    else
+        echo '{"status":"daemon not running"}'
+    fi
+    exit 0
+fi
+
+# === CHỨC NĂNG STATUS DAEMON ===
+if echo "$MODE" | grep -q 'daemon=status'; then
+    if [ -f "$DAEMON_PID_FILE" ]; then
+        DAEMON_PID=$(cat "$DAEMON_PID_FILE")
+        if ps -p "$DAEMON_PID" >/dev/null 2>&1; then
+            UPTIME=$(ps -o etime= -p "$DAEMON_PID" | tr -d ' ')
+            echo '{"status":"daemon running","pid":'$DAEMON_PID',"uptime":"'$UPTIME'"}'
+        else
+            rm -f "$DAEMON_PID_FILE"
+            echo '{"status":"daemon not running","note":"stale pid file removed"}'
+        fi
+    else
+        echo '{"status":"daemon not running"}'
+    fi
+    exit 0
+fi
+
 # === DEBUG LOG ===
 DEBUG_LOG="/tmp/sms-read-debug.log"
 debug() {
