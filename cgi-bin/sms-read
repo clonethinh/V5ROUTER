@@ -75,10 +75,37 @@ escape_json_text() {
     echo "$text" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g; s/\r/\\r/g'
 }
 
-# === THÊM MESSAGE VÀO MONTHLY FILE - SỬA LỖI JQ ===
+# === THÊM MESSAGE VÀO MONTHLY FILE - ĐÃ SỬA LỖI DUPLICATE ===
 add_to_monthly() {
     local new_message="$1"
     debug "Adding message to monthly file"
+    
+    # Extract message ID để check duplicate
+    local message_id
+    if command -v jq >/dev/null 2>&1; then
+        message_id=$(echo "$new_message" | jq -r '.id' 2>/dev/null)
+    else
+        # Fallback parsing nếu không có jq
+        message_id=$(echo "$new_message" | sed -n 's/.*"id":[[:space:]]*\([0-9]*\).*/\1/p')
+    fi
+    
+    # Check if message ID already exists
+    if [ -n "$message_id" ] && [ -f "$MONTHLY_FILE" ]; then
+        if command -v jq >/dev/null 2>&1; then
+            if jq -e ".messages[]? | select(.id == $message_id)" "$MONTHLY_FILE" >/dev/null 2>&1; then
+                debug "Message ID $message_id already exists, skipping duplicate"
+                return 0
+            fi
+        else
+            # Fallback check với grep
+            if grep -q "\"id\":[[:space:]]*$message_id[^0-9]" "$MONTHLY_FILE" 2>/dev/null; then
+                debug "Message ID $message_id already exists, skipping duplicate"
+                return 0
+            fi
+        fi
+    fi
+    
+    debug "Message ID $message_id is new, proceeding to add"
     
     # Backup
     cp "$MONTHLY_FILE" "${MONTHLY_FILE}.backup" 2>/dev/null
@@ -108,7 +135,7 @@ add_to_monthly() {
         rm -f /tmp/new_msg_$$.json
         
         if [ -s "$TEMP_FILE" ] && jq . "$TEMP_FILE" >/dev/null 2>&1; then
-            debug "jq processing successful"
+            debug "jq processing successful for message ID $message_id"
         else
             debug "jq processing failed"
             if [ -f /tmp/jq_error_$$.log ]; then
@@ -144,7 +171,7 @@ add_to_monthly() {
     
     if [ -s "$TEMP_FILE" ]; then
         mv "$TEMP_FILE" "$MONTHLY_FILE"
-        debug "Successfully added message to monthly file"
+        debug "Successfully added message ID $message_id to monthly file"
         return 0
     else
         debug "Failed to create temp file or temp file empty"
@@ -154,6 +181,78 @@ add_to_monthly() {
         fi
         return 1
     fi
+}
+
+# === CLEANUP DUPLICATE ENTRIES ===
+cleanup_duplicates() {
+    debug "Starting duplicate cleanup"
+    
+    if [ ! -f "$MONTHLY_FILE" ]; then
+        debug "Monthly file doesn't exist, skipping cleanup"
+        return 0
+    fi
+    
+    # Backup trước khi cleanup
+    cp "$MONTHLY_FILE" "${MONTHLY_FILE}.cleanup_backup" 2>/dev/null
+    
+    if command -v jq >/dev/null 2>&1; then
+        debug "Using jq for duplicate cleanup"
+        
+        # Count before cleanup
+        BEFORE_COUNT=$(jq '.messages | length' "$MONTHLY_FILE" 2>/dev/null || echo "0")
+        
+        # Group by ID và chỉ lấy phần tử đầu tiên của mỗi group
+        jq '
+            .messages |= (
+                group_by(.id) | 
+                map(.[0])
+            ) |
+            .total = (.messages | length) |
+            .last_updated = (now | strftime("%Y-%m-%d %H:%M:%S"))
+        ' "$MONTHLY_FILE" > "$TEMP_FILE" 2>/dev/null
+        
+        if [ -s "$TEMP_FILE" ] && jq . "$TEMP_FILE" >/dev/null 2>&1; then
+            mv "$TEMP_FILE" "$MONTHLY_FILE"
+            
+            # Count after cleanup
+            AFTER_COUNT=$(jq '.messages | length' "$MONTHLY_FILE" 2>/dev/null || echo "0")
+            REMOVED_COUNT=$((BEFORE_COUNT - AFTER_COUNT))
+            
+            debug "Duplicate cleanup completed: $BEFORE_COUNT -> $AFTER_COUNT messages (removed $REMOVED_COUNT duplicates)"
+            rm -f "${MONTHLY_FILE}.cleanup_backup"
+            return 0
+        else
+            debug "Duplicate cleanup failed, restoring backup"
+            if [ -f "${MONTHLY_FILE}.cleanup_backup" ]; then
+                mv "${MONTHLY_FILE}.cleanup_backup" "$MONTHLY_FILE"
+            fi
+            rm -f "$TEMP_FILE"
+            return 1
+        fi
+    else
+        debug "jq not available, skipping duplicate cleanup"
+        rm -f "${MONTHLY_FILE}.cleanup_backup"
+        return 0
+    fi
+}
+
+# === XÓA SMS VỚI RETRY MECHANISM ===
+delete_sms_with_retry() {
+    local sms_id="$1"
+    local retry_count=3
+    
+    for i in $(seq 1 $retry_count); do
+        if mmcli -m 0 --messaging-delete-sms="$sms_id" >/dev/null 2>&1; then
+            debug "Successfully deleted SMS $sms_id from SIM (attempt $i)"
+            return 0
+        else
+            debug "Failed to delete SMS $sms_id from SIM (attempt $i)"
+            sleep 1
+        fi
+    done
+    
+    debug "Failed to delete SMS $sms_id from SIM after $retry_count attempts"
+    return 1
 }
 
 # === ĐỌC MESSAGES TỪ ARCHIVE ===
@@ -175,7 +274,7 @@ debug "Raw SMS list: $SMS_LIST"
 
 SMS_IDS=""
 if [ -n "$SMS_LIST" ]; then
-    # Thay vì tăng dần, bạn có thể đổi sort -n thành sort -nr nếu muốn
+    # Sắp xếp giảm dần để xử lý tin nhắn mới nhất trước
     SMS_IDS=$(echo "$SMS_LIST" | grep -oE '/SMS/[0-9]+' | sed 's|/SMS/||g' | sort -nr)
     debug "Extracted SMS IDs (sorted desc): $SMS_IDS"
 fi
@@ -205,6 +304,7 @@ for ID in $SMS_IDS; do
         continue
     fi
     
+    # Fix timezone format nếu cần
     if echo "$DATE" | grep -qE '\+[0-9]{2}$'; then
         DATE=$(echo "$DATE" | sed 's/+\([0-9][0-9]\)$/+\1:00/')
     fi
@@ -212,13 +312,13 @@ for ID in $SMS_IDS; do
     TEXT_ESC=$(escape_json_text "$RAW_TEXT")
     NUMBER_ESC=$(escape_json_text "$NUMBER")
     
-	# Xác định read_status mặc định theo loại tin nhắn
-	READ_STATUS=1
-	if [ "$TYPE" = "deliver" ]; then
-		READ_STATUS=0
-	fi	
-	
-NEW_MESSAGE="{
+    # Xác định read_status mặc định theo loại tin nhắn
+    READ_STATUS=1
+    if [ "$TYPE" = "deliver" ]; then
+        READ_STATUS=0
+    fi
+
+    NEW_MESSAGE="{
   \"id\": $ID,
   \"number\": \"$NUMBER_ESC\",
   \"text\": \"$TEXT_ESC\",
@@ -234,11 +334,11 @@ NEW_MESSAGE="{
     if add_to_monthly "$NEW_MESSAGE"; then
         debug "Successfully saved SMS $ID to archive"
         
-        # Xóa SMS khỏi SIM sau khi lưu
-        if mmcli -m 0 --messaging-delete-sms="$ID" >/dev/null 2>&1; then
-            debug "Deleted SMS $ID from SIM"
+        # Xóa SMS khỏi SIM sau khi lưu với retry mechanism
+        if delete_sms_with_retry "$ID"; then
+            debug "SMS $ID deleted from SIM successfully"
         else
-            debug "Failed to delete SMS $ID from SIM"
+            debug "WARNING: SMS $ID saved to archive but failed to delete from SIM"
         fi
         
         PROCESSED_COUNT=$((PROCESSED_COUNT + 1))
@@ -249,11 +349,23 @@ done
 
 debug "Finished processing. Total new messages: $PROCESSED_COUNT"
 
+# === CLEANUP DUPLICATES TRƯỚC KHI OUTPUT ===
+cleanup_duplicates
+
 # 3. IN RA JSON CHUẨN VỚI MẢNG MESSAGES ĐƯỢC SẮP XẾP GIẢM DẦN THEO ID
-jq '.messages |= sort_by(.id) | .messages |= reverse' "$MONTHLY_FILE"
+if [ -f "$MONTHLY_FILE" ]; then
+    if command -v jq >/dev/null 2>&1; then
+        jq '.messages |= sort_by(.id) | .messages |= reverse' "$MONTHLY_FILE"
+    else
+        # Fallback nếu không có jq
+        cat "$MONTHLY_FILE"
+    fi
+else
+    echo '{ "messages": [], "total": 0 }'
+fi
 
 # CLEANUP
-rm -f "$TEMP_FILE" "${MONTHLY_FILE}.backup" /tmp/jq_error_$$.log
+rm -f "$TEMP_FILE" "${MONTHLY_FILE}.backup" "${MONTHLY_FILE}.cleanup_backup" /tmp/jq_error_$$.log /tmp/new_msg_$$.json
 flock -u 200
 
 debug "=== SMS-READ END ==="
